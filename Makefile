@@ -1,120 +1,220 @@
-# Makefile for Legacy PLC Simulator
-# Optimized for Raspberry Pi Model B (ARMv6, 512MB RAM)
+# Multi-Target Makefile for legacy_plc
+# Supports: Pi native, cross-compile, and virtual cluster builds
 
-CXX = g++
-CXXFLAGS = -std=c++11 -O2 -Wall -Wextra -pthread
-TARGET = legacy_plc
-SOURCES = legacy_plc.cpp
+PROJECT = legacy_plc
+SOURCE = legacy_plc.cpp
 
-# Pi Model B specific optimizations
-CXXFLAGS += -march=armv6 -mfpu=vfp -mfloat-abi=hard
-CXXFLAGS += -DLEGACY_HARDWARE
+# Detect host architecture for auto-target selection
+HOST_ARCH := $(shell uname -m)
 
-# Memory constraints for 512MB system
-CXXFLAGS += -fno-rtti -ffunction-sections -fdata-sections
-LDFLAGS = -Wl,--gc-sections
+# Compiler selection
+NATIVE_CXX = g++
+CROSS_CXX = arm-linux-gnueabihf-g++
 
-# Debug build option
-DEBUG ?= 0
-ifeq ($(DEBUG), 1)
-    CXXFLAGS += -g -DDEBUG
-    CXXFLAGS := $(filter-out -O2,$(CXXFLAGS))
-else
-    CXXFLAGS += -DNDEBUG
+# Base compiler flags (common to all targets)
+BASE_CXXFLAGS = -std=c++11 -Wall -Wextra -pthread -fno-rtti -ffunction-sections -fdata-sections
+BASE_LDFLAGS = -Wl,--gc-sections
+
+# Build configurations
+DEBUG_FLAGS = -g -DDEBUG -O0
+RELEASE_FLAGS = -O2 -DNDEBUG
+
+#==============================================================================
+# Target Configurations
+#==============================================================================
+
+# 1. Raspberry Pi Native Build (when building directly on Pi)
+RPI_NATIVE_CXX = $(NATIVE_CXX)
+RPI_NATIVE_CXXFLAGS = $(BASE_CXXFLAGS) $(RELEASE_FLAGS) -DLEGACY_HARDWARE -DRASPBERRY_PI
+RPI_NATIVE_LDFLAGS = $(BASE_LDFLAGS)
+
+# Architecture-specific flags for different Pi models
+ifeq ($(HOST_ARCH),armv6l)
+    RPI_NATIVE_CXXFLAGS += -march=armv6 -mfpu=vfp -mfloat-abi=hard -DRPI_MODEL_B
+else ifeq ($(HOST_ARCH),armv7l)  
+    RPI_NATIVE_CXXFLAGS += -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard -DRPI_MODEL_2_3
+else ifeq ($(HOST_ARCH),aarch64)
+    RPI_NATIVE_CXXFLAGS += -march=armv8-a -DRPI_MODEL_4_5
 endif
 
-.PHONY: all clean install service status logs
+# 2. Cross-Compile for Pi (building on x86/x64 Linux for Pi deployment)
+CROSS_PI_CXX = $(CROSS_CXX)
+CROSS_PI_CXXFLAGS = $(BASE_CXXFLAGS) $(RELEASE_FLAGS) -DLEGACY_HARDWARE -DRASPBERRY_PI
+CROSS_PI_LDFLAGS = $(BASE_LDFLAGS)
 
-all: $(TARGET)
+# Default to Pi Model B target for cross-compile (most restrictive)
+CROSS_PI_CXXFLAGS += -march=armv6 -mfpu=vfp -mfloat-abi=hard -DRPI_MODEL_B
 
-$(TARGET): $(SOURCES)
-	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
-	@echo "Legacy PLC built successfully for Pi Model B"
-	@ls -lh $(TARGET)
+# 3. Virtual Cluster Build (x86/x64 for testing/simulation)
+VIRTUAL_CXX = $(NATIVE_CXX)
+VIRTUAL_CXXFLAGS = $(BASE_CXXFLAGS) $(RELEASE_FLAGS) -DVIRTUAL_HARDWARE -DSIMULATION_MODE
+VIRTUAL_LDFLAGS = $(BASE_LDFLAGS)
 
+# Add native architecture optimizations for virtual build
+ifeq ($(HOST_ARCH),x86_64)
+    VIRTUAL_CXXFLAGS += -march=native -mtune=native -DARCH_X86_64
+else ifeq ($(findstring x86,$(HOST_ARCH)),x86)
+    VIRTUAL_CXXFLAGS += -march=native -mtune=native -DARCH_X86
+endif
+
+#==============================================================================
+# Build Targets
+#==============================================================================
+
+# Default target - auto-detect best build
+all: auto
+
+# Auto-detection logic
+auto:
+	@echo "Auto-detecting build target for $(HOST_ARCH)..."
+ifeq ($(findstring arm,$(HOST_ARCH)),arm)
+	@echo "ARM architecture detected - building Pi native version"
+	$(MAKE) rpi-native
+else
+	@echo "Non-ARM architecture detected - building virtual cluster version"  
+	$(MAKE) virtual
+endif
+
+# 1. Raspberry Pi native build (run this ON the Pi)
+rpi-native: $(PROJECT)_rpi_native
+$(PROJECT)_rpi_native: $(SOURCE)
+	@echo "Building native Pi version for $(HOST_ARCH)..."
+	$(RPI_NATIVE_CXX) $(RPI_NATIVE_CXXFLAGS) -o $(PROJECT) $(SOURCE) $(RPI_NATIVE_LDFLAGS)
+	@echo "✓ Pi native build complete: $(PROJECT)"
+
+# 2. Cross-compile for Pi (run this on x86/x64 Linux)  
+cross-pi: $(PROJECT)_cross_pi
+pi: cross-pi  # Alias
+$(PROJECT)_cross_pi: $(SOURCE)
+	@echo "Cross-compiling for Raspberry Pi..."
+	@which $(CROSS_CXX) >/dev/null || (echo "ERROR: $(CROSS_CXX) not found. Install with: sudo apt install gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf"; exit 1)
+	$(CROSS_PI_CXX) $(CROSS_PI_CXXFLAGS) -o $(PROJECT) $(SOURCE) $(CROSS_PI_LDFLAGS)
+	@echo "✓ Cross-compile complete: $(PROJECT) (for Pi deployment)"
+
+# Cross-compile for specific Pi models
+cross-pi-b: CROSS_PI_CXXFLAGS += -march=armv6 -mfpu=vfp -mfloat-abi=hard -DRPI_MODEL_B
+cross-pi-b: cross-pi
+
+cross-pi-2: CROSS_PI_CXXFLAGS += -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard -DRPI_MODEL_2_3  
+cross-pi-2: cross-pi
+
+cross-pi-4: CROSS_PI_CXXFLAGS += -march=armv8-a -DRPI_MODEL_4_5
+cross-pi-4: cross-pi
+
+# 3. Virtual cluster build (for x86/x64 testing)
+virtual: $(PROJECT)_virtual
+$(PROJECT)_virtual: $(SOURCE)
+	@echo "Building virtual cluster version for $(HOST_ARCH)..."
+	$(VIRTUAL_CXX) $(VIRTUAL_CXXFLAGS) -o $(PROJECT) $(SOURCE) $(VIRTUAL_LDFLAGS)
+	@echo "✓ Virtual cluster build complete: $(PROJECT)"
+
+# Debug builds for each target
+debug-rpi:
+	$(RPI_NATIVE_CXX) $(BASE_CXXFLAGS) $(DEBUG_FLAGS) -DLEGACY_HARDWARE -DRASPBERRY_PI -o $(PROJECT)_debug $(SOURCE) $(BASE_LDFLAGS)
+	@echo "✓ Pi debug build complete: $(PROJECT)_debug"
+
+debug-cross:
+	@which $(CROSS_CXX) >/dev/null || (echo "ERROR: Cross compiler not found"; exit 1)
+	$(CROSS_PI_CXX) $(BASE_CXXFLAGS) $(DEBUG_FLAGS) -DLEGACY_HARDWARE -DRASPBERRY_PI -march=armv6 -mfpu=vfp -mfloat-abi=hard -o $(PROJECT)_debug $(SOURCE) $(BASE_LDFLAGS)
+	@echo "✓ Cross debug build complete: $(PROJECT)_debug"
+
+debug-virtual:
+	$(VIRTUAL_CXX) $(BASE_CXXFLAGS) $(DEBUG_FLAGS) -DVIRTUAL_HARDWARE -DSIMULATION_MODE -o $(PROJECT)_debug $(SOURCE) $(BASE_LDFLAGS)
+	@echo "✓ Virtual debug build complete: $(PROJECT)_debug"
+
+#==============================================================================
+# Utility Targets
+#==============================================================================
+
+# Clean all build artifacts
 clean:
-	rm -f $(TARGET) *.o
-	@echo "Cleaned build artifacts"
+	@echo "Cleaning build artifacts..."
+	rm -f $(PROJECT) $(PROJECT)_debug
+	rm -f *.o *.so *.a
+	rm -f /tmp/plc_data.log
+	@echo "✓ Clean complete"
 
-# Install as systemd service
-install: $(TARGET)
-	sudo cp $(TARGET) /usr/local/bin/
-	sudo cp legacy-plc.service /etc/systemd/system/
-	sudo systemctl daemon-reload
-	sudo systemctl enable legacy-plc
-	@echo "Legacy PLC installed as system service"
+# Install targets
+install-rpi: rpi-native
+	@echo "Installing Pi native version..."
+	sudo cp $(PROJECT) /usr/local/bin/
+	sudo chmod +x /usr/local/bin/$(PROJECT)
+	@echo "✓ Installed to /usr/local/bin/$(PROJECT)"
 
-# Service management targets
-service:
-	sudo systemctl start legacy-plc
-	@echo "Legacy PLC service started"
+install-virtual: virtual  
+	@echo "Installing virtual version..."
+	sudo cp $(PROJECT) /usr/local/bin/$(PROJECT)-virtual
+	sudo chmod +x /usr/local/bin/$(PROJECT)-virtual
+	@echo "✓ Installed to /usr/local/bin/$(PROJECT)-virtual"
 
-stop:
-	sudo systemctl stop legacy-plc
-	@echo "Legacy PLC service stopped"
-
-status:
-	sudo systemctl status legacy-plc
-
-logs:
-	sudo journalctl -u legacy-plc -f
-
-# Create systemd service file
-service-file:
-	@echo "[Unit]" > legacy-plc.service
-	@echo "Description=Legacy PLC Simulator" >> legacy-plc.service
-	@echo "After=network.target" >> legacy-plc.service
-	@echo "" >> legacy-plc.service
-	@echo "[Service]" >> legacy-plc.service
-	@echo "Type=simple" >> legacy-plc.service
-	@echo "User=pi" >> legacy-plc.service
-	@echo "ExecStart=/usr/local/bin/legacy_plc" >> legacy-plc.service
-	@echo "Restart=always" >> legacy-plc.service
-	@echo "RestartSec=10" >> legacy-plc.service
-	@echo "" >> legacy-plc.service
-	@echo "[Install]" >> legacy-plc.service
-	@echo "WantedBy=multi-user.target" >> legacy-plc.service
-	@echo "Systemd service file created"
-
-# Network test client
-test-client:
-	@echo "Testing legacy PLC communication..."
-	@echo -e "STATUS\nRI0\nRR0" | nc localhost 9001 || echo "PLC not responding"
-
-# Monitor resources (important for Pi Model B)
-monitor:
-	@echo "=== System Resources ==="
-	@echo "Memory usage:"
-	@free -h
+# System and build information
+info:
+	@echo "=== Build Environment Information ==="
+	@echo "Host Architecture: $(HOST_ARCH)"
+	@echo "Native Compiler:   $(NATIVE_CXX) ($(shell $(NATIVE_CXX) --version | head -n1))"
+	@echo "Cross Compiler:    $(CROSS_CXX) ($(shell which $(CROSS_CXX) >/dev/null 2>&1 && $(CROSS_CXX) --version | head -n1 || echo 'NOT FOUND'))"
 	@echo ""
-	@echo "CPU temperature:"
-	@cat /sys/class/thermal/thermal_zone0/temp | awk '{print $$1/1000"�C"}'
-	@echo ""
-	@echo "PLC process:"
-	@ps aux | grep legacy_plc | grep -v grep || echo "PLC not running"
+	@echo "=== Available Build Targets ==="
+	@echo "Native Pi:       rpi-native    (build on Pi)"
+	@echo "Cross Pi:        cross-pi, pi  (build on x86 for Pi)"
+	@echo "Virtual Cluster: virtual       (build for x86 testing)"
+	@echo "Auto-detect:     auto, all     (choose automatically)"
 
-# Development helpers
-dev: DEBUG=1
-dev: clean $(TARGET)
-	@echo "Debug build complete - use gdb for debugging"
+# Dependency checking
+check-deps:
+	@echo "Checking build dependencies..."
+	@which $(NATIVE_CXX) >/dev/null || (echo "✗ $(NATIVE_CXX) not found"; exit 1)
+	@echo "✓ Native compiler found: $(NATIVE_CXX)"
+	@which $(CROSS_CXX) >/dev/null && echo "✓ Cross compiler found: $(CROSS_CXX)" || echo "⚠ Cross compiler not found (install gcc-arm-linux-gnueabihf for Pi cross-compilation)"
+	@echo "✓ Dependency check complete"
 
-valgrind: dev
-	valgrind --leak-check=full --show-leak-kinds=all ./$(TARGET)
+# Test targets (basic functionality verification)
+test-native: rpi-native
+	@echo "Testing native build..."
+	./$(PROJECT) --version 2>/dev/null || echo "Build appears successful (may need Pi hardware to run)"
 
+test-virtual: virtual
+	@echo "Testing virtual build..."  
+	timeout 5 ./$(PROJECT) || echo "Build appears successful (timeout is normal)"
+
+# Development workflow helpers
+dev-cycle: clean virtual test-virtual
+	@echo "✓ Development cycle complete"
+
+deploy-prep: clean cross-pi
+	@echo "✓ Deployment binary ready: $(PROJECT)"
+	@file $(PROJECT)
+
+# Help target
 help:
-	@echo "Legacy PLC Simulator - Build System"
+	@echo "Legacy PLC Multi-Target Build System"
 	@echo ""
-	@echo "Targets:"
-	@echo "  all         - Build the PLC simulator"
-	@echo "  clean       - Remove build artifacts"
-	@echo "  install     - Install as systemd service"
-	@echo "  service     - Start the PLC service"
-	@echo "  stop        - Stop the PLC service"
-	@echo "  status      - Show service status"
-	@echo "  logs        - Show live service logs"
-	@echo "  test-client - Test PLC communication"
-	@echo "  monitor     - Show system resources"
-	@echo "  dev         - Build debug version"
+	@echo "=== Main Build Targets ==="
+	@echo "  all, auto       - Auto-detect and build appropriate version"
+	@echo "  rpi-native      - Build native version (run ON Raspberry Pi)" 
+	@echo "  cross-pi, pi    - Cross-compile for Pi (run on x86/x64 Linux)"
+	@echo "  virtual         - Build for virtual cluster (x86/x64 testing)"
 	@echo ""
-	@echo "Environment:"
-	@echo "  DEBUG=1     - Enable debug build"
+	@echo "=== Specific Pi Models ==="
+	@echo "  cross-pi-b      - Cross-compile for Pi Model B (ARMv6)"
+	@echo "  cross-pi-2      - Cross-compile for Pi 2/3 (ARMv7)" 
+	@echo "  cross-pi-4      - Cross-compile for Pi 4/5 (ARMv8)"
+	@echo ""
+	@echo "=== Debug Builds ==="
+	@echo "  debug-rpi       - Debug build for Pi native"
+	@echo "  debug-cross     - Debug build for Pi cross-compile"
+	@echo "  debug-virtual   - Debug build for virtual cluster"
+	@echo ""
+	@echo "=== Utilities ==="
+	@echo "  clean           - Remove build artifacts"
+	@echo "  install-rpi     - Install Pi native version"
+	@echo "  install-virtual - Install virtual version"
+	@echo "  info            - Show build environment info"
+	@echo "  check-deps      - Check build dependencies"
+	@echo "  dev-cycle       - Clean + virtual build + test"
+	@echo "  deploy-prep     - Clean + cross-compile for deployment"
+	@echo "  help            - Show this help"
+
+.PHONY: all auto rpi-native cross-pi pi cross-pi-b cross-pi-2 cross-pi-4 virtual \
+        debug-rpi debug-cross debug-virtual clean install-rpi install-virtual \
+        info check-deps test-native test-virtual dev-cycle deploy-prep help

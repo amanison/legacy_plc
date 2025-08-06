@@ -12,6 +12,12 @@
 #include <iomanip>
 #include <sstream>
 
+#ifdef VIRTUAL_HARDWARE
+#include <sys/stat.h>
+#include <unistd.h>
+// Virtual hardware simulation includes
+#endif
+
 // Legacy PLC Simulator - mimics early 2000s industrial controller
 class LegacyPLC {
 private:
@@ -59,21 +65,50 @@ public:
     }
     
     void initialize_system() {
+#ifdef VIRTUAL_HARDWARE
+        std::cout << "=== LEGACY PLC SIMULATOR v2.1 (VIRTUAL) ===" << std::endl;
+        std::cout << "Running in virtual cluster mode" << std::endl;
+        std::cout << "Hardware simulation: ENABLED" << std::endl;
+#elif defined(RASPBERRY_PI)
+        std::cout << "=== LEGACY PLC SIMULATOR v2.1 (RASPBERRY PI) ===" << std::endl;
+#ifdef RPI_MODEL_B
+        std::cout << "Target: Raspberry Pi Model B" << std::endl;
+#elif defined(RPI_MODEL_2_3)
+        std::cout << "Target: Raspberry Pi 2/3" << std::endl;
+#elif defined(RPI_MODEL_4_5)
+        std::cout << "Target: Raspberry Pi 4/5" << std::endl;
+#endif
+#else
         std::cout << "=== LEGACY PLC SIMULATOR v2.1 ===" << std::endl;
+#endif
+
         std::cout << "Compatible with: Modicon, Allen-Bradley, Siemens" << std::endl;
         std::cout << "Protocol: ASCII/TCP (Pre-OPC UA)" << std::endl;
         std::cout << "Scan Rate: " << CYCLE_TIME_MS << "ms" << std::endl;
-        
+ 
         // Initialize network
         setup_network();
         
-        // Initialize data logging 
-        log_file.open("/tmp/plc_data.log", std::ios::app);
-        if (log_file.is_open()) {
-            log_file << "# PLC Data Log - Started " << get_timestamp() << std::endl;
+        // Initialize data logging with environment-specific path
+#ifdef VIRTUAL_HARDWARE
+        std::string log_path = "/tmp/plc_data_virtual.log";
+        // Create directory if it doesn't exist
+        system("mkdir -p /tmp");
+#else
+        std::string log_path = "/tmp/plc_data.log";
+#endif
+
+        log_file.open(log_path, std::ios::app);
+        if (log_file.is_open())
+        {
+            log_file << "# PLC Data Log - Started " << get_timestamp();
+#ifdef VIRTUAL_HARDWARE
+            log_file << " (Virtual Mode)";
+#endif
+            log_file << std::endl;
             log_file << "# Format: TIMESTAMP,CYCLE,I0-I15,O0-O15,ERR" << std::endl;
         }
-        
+
         // Load "ladder logic" simulation
         load_control_program();
         
@@ -83,34 +118,50 @@ public:
         std::cout << "System initialized. Starting scan cycle..." << std::endl;
     }
     
-    void setup_network() {
+    void setup_network()
+    {
+#ifdef VIRTUAL_HARDWARE
+        // Virtual hardware uses different default port to avoid conflicts
+        const int VIRTUAL_TCP_PORT = 9901; // Different from real hardware
+        std::cout << "Virtual Hardware Mode - Using port " << VIRTUAL_TCP_PORT << std::endl;
+#endif
+
         server_socket = socket(AF_INET, SOCK_STREAM, 0);
-        if (server_socket < 0) {
+        if (server_socket < 0)
+        {
             std::cerr << "Failed to create socket" << std::endl;
             return;
         }
-        
+
         // Make socket non-blocking for legacy-style polling
         int flags = fcntl(server_socket, F_GETFL, 0);
         fcntl(server_socket, F_SETFL, flags | O_NONBLOCK);
-        
+
         // Reuse address
         int opt = 1;
         setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-        
+
         server_addr.sin_family = AF_INET;
         server_addr.sin_addr.s_addr = INADDR_ANY;
+
+#ifdef VIRTUAL_HARDWARE
+        server_addr.sin_port = htons(VIRTUAL_TCP_PORT);
+        std::cout << "TCP Server listening on port " << VIRTUAL_TCP_PORT << " (virtual mode)" << std::endl;
+#else
         server_addr.sin_port = htons(TCP_PORT);
-        
-        if (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        std::cout << "TCP Server listening on port " << TCP_PORT << std::endl;
+#endif
+
+        if (bind(server_socket, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
+        {
             std::cerr << "Failed to bind socket" << std::endl;
             return;
         }
-        
-        listen(server_socket, 1);  // Only one connection (typical of legacy)
-        std::cout << "TCP Server listening on port " << TCP_PORT << std::endl;
+
+        listen(server_socket, 1);
     }
-    
+
+
     void load_control_program() {
         // Simulate loading "ladder logic" - typical startup sequence
         std::cout << "Loading control program..." << std::endl;
@@ -155,21 +206,60 @@ public:
         }
     }
     
-    void scan_inputs() {
-        // Simulate input scanning - typical legacy PLC behavior
-        // In real system, this would read from I/O modules
-        
-        // Simulate some varying inputs (temperature sensor, etc.)
-        state.inputs[0] = 750 + (rand() % 100); // Temperature sensor (raw ADC)
+    // Enhanced input simulation for virtual mode:
+    void scan_inputs()
+    {
+        // Simulate input scanning with enhanced virtual behavior
+
+#ifdef VIRTUAL_HARDWARE
+        // More realistic simulation for virtual cluster testing
+        static double temp_simulation = 750.0;
+        static double pressure_simulation = 500.0;
+        static int cycle_input_period = 200;
+
+        // Temperature with more complex behavior in virtual mode
+        temp_simulation += (sin(state.cycle_count * 0.1) * 2) + ((rand() % 20) - 10) * 0.1;
+        if (temp_simulation < 600)
+            temp_simulation = 600;
+        if (temp_simulation > 900)
+            temp_simulation = 900;
+        state.inputs[0] = (uint16_t)temp_simulation;
+
+        // Pressure with virtual drift
+        pressure_simulation += (rand() % 6) - 3; // Random walk
+        if (pressure_simulation < 400)
+            pressure_simulation = 400;
+        if (pressure_simulation > 600)
+            pressure_simulation = 600;
+        state.inputs[3] = (uint16_t)pressure_simulation;
+
+        // Cycle input with configurable period in virtual mode
+        state.inputs[1] = (state.cycle_count % cycle_input_period < cycle_input_period / 2) ? 1 : 0;
+
+        // Always-on input (run enable) - can be controlled via external file in virtual mode
+        state.inputs[2] = 1; // Default enabled
+
+        // Check for virtual control file
+        struct stat buffer;
+        if (stat("/tmp/plc_stop", &buffer) == 0)
+        {
+            state.inputs[2] = 0; // Stop if file exists
+        }
+
+#else
+        // Original simulation for hardware builds
+        state.inputs[0] = 750 + (rand() % 100);                    // Temperature sensor (raw ADC)
         state.inputs[1] = (state.cycle_count % 200 < 100) ? 1 : 0; // Cycle input
-        state.inputs[2] = 1; // Always-on input (run enable)
-        
+        state.inputs[2] = 1;                                       // Always-on input (run enable)
+
         // Simulate pressure sensor with drift
         static int pressure_base = 500;
         pressure_base += (rand() % 3) - 1; // Random walk
         state.inputs[3] = pressure_base;
+#endif
     }
-    
+
+
     void execute_control_logic() {
         // Simulate ladder logic execution - very simple control program
         // This mimics early 2000s PLC programming style
@@ -328,17 +418,51 @@ public:
 };
 
 // Main program
-int main() {
+int main(int argc, char *argv[])
+{
+    // Handle command line arguments
+    if (argc > 1)
+    {
+        if (strcmp(argv[1], "--version") == 0)
+        {
+            std::cout << "Legacy PLC Simulator v2.1" << std::endl;
+#ifdef VIRTUAL_HARDWARE
+            std::cout << "Build: Virtual Hardware" << std::endl;
+#elif defined(RASPBERRY_PI)
+            std::cout << "Build: Raspberry Pi Hardware" << std::endl;
+#else
+            std::cout << "Build: Generic Hardware" << std::endl;
+#endif
+            return 0;
+        }
+        else if (strcmp(argv[1], "--help") == 0)
+        {
+            std::cout << "Legacy PLC Simulator" << std::endl;
+            std::cout << "Usage: " << argv[0] << " [options]" << std::endl;
+            std::cout << "Options:" << std::endl;
+            std::cout << "  --version    Show version information" << std::endl;
+            std::cout << "  --help       Show this help" << std::endl;
+            return 0;
+        }
+    }
+
+#ifdef VIRTUAL_HARDWARE
+    std::cout << "Starting Legacy PLC Simulator in Virtual Cluster Mode" << std::endl;
+    std::cout << "Simulating: Schneider/Modicon TSX Premium (circa 2004)" << std::endl;
+    std::cout << "Virtual Hardware: No GPIO dependencies" << std::endl;
+#else
     std::cout << "Starting Legacy PLC Simulator on Raspberry Pi Model B" << std::endl;
     std::cout << "Simulating: Schneider/Modicon TSX Premium (circa 2004)" << std::endl;
-    
+#endif
+
     LegacyPLC plc;
-    
+
     // Main execution loop
-    while (plc.is_running()) {
+    while (plc.is_running())
+    {
         plc.run_scan_cycle();
         usleep(1000); // Small sleep to prevent 100% CPU usage
     }
-    
+
     return 0;
 }
