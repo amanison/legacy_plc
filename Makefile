@@ -185,6 +185,30 @@ deploy-prep: clean cross-pi
 	@echo "✓ Deployment binary ready: $(PROJECT)"
 	@file $(PROJECT)
 
+# Deployment targets
+PI_HOST ?= pi-legacy
+PI_USER ?= pi
+
+deploy-build: cross-pi-2
+	@echo "? Deployment binary ready for Pi2"
+
+deploy-full: deploy-build
+	@echo "Deploying to $(PI_HOST)..."
+	@chmod +x deploy.sh
+	./deploy.sh full --host $(PI_HOST) --user $(PI_USER)
+
+deploy-service: 
+	@chmod +x deploy.sh
+	./deploy.sh service --host $(PI_HOST) --user $(PI_USER)
+
+deploy-test:
+	@chmod +x deploy.sh  
+	./deploy.sh test --host $(PI_HOST) --user $(PI_USER)
+
+deploy-status:
+	@chmod +x deploy.sh
+	./deploy.sh status --host $(PI_HOST) --user $(PI_USER)
+
 # Help target
 help:
 	@echo "Legacy PLC Multi-Target Build System"
@@ -205,6 +229,13 @@ help:
 	@echo "  debug-cross     - Debug build for Pi cross-compile"
 	@echo "  debug-virtual   - Debug build for virtual cluster"
 	@echo ""
+	@echo "=== Deployment ==="
+	@echo "  deploy-build    - Cross-compile for Pi2 deployment"
+	@echo "  deploy-full     - Complete deployment to pi-legacy" 
+	@echo "  deploy-service  - Install/enable systemd service"
+	@echo "  deploy-test     - Test deployed service"
+	@echo "  deploy-status   - Check service status"
+	@echo ""
 	@echo "=== Utilities ==="
 	@echo "  clean           - Remove build artifacts"
 	@echo "  install-rpi     - Install Pi native version"
@@ -217,4 +248,5 @@ help:
 
 .PHONY: all auto rpi-native cross-pi pi cross-pi-b cross-pi-2 cross-pi-4 virtual \
         debug-rpi debug-cross debug-virtual clean install-rpi install-virtual \
-        info check-deps test-native test-virtual dev-cycle deploy-prep help
+        info check-deps test-native test-virtual dev-cycle deploy-prep \
+        deploy-build deploy-full deploy-service deploy-test deploy-status help
