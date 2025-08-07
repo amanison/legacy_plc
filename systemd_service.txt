@@ -1,0 +1,43 @@
+[Unit]
+Description=Legacy PLC Simulator
+Documentation=man:legacy_plc(1)
+After=network.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/opt/legacy-plc
+ExecStart=/opt/legacy-plc/legacy_plc
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/legacy-plc /tmp
+
+# Resource limits for Pi2
+MemoryMax=128M
+CPUQuota=50%
+
+# Network settings for cluster integration
+Environment="PLC_CONTROL_VLAN=192.168.10.15"
+Environment="PLC_MGMT_VLAN=192.168.99.15"
+Environment="PLC_NODE_TYPE=legacy"
+
+# Logging configuration
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=legacy-plc
+
+[Install]
+WantedBy=multi-user.target
