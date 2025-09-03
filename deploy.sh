@@ -1,6 +1,6 @@
 #!/bin/bash
-# Legacy PLC Deployment System
-# Deploys legacy_plc to pi-legacy (Pi2) and configures autostart
+# Legacy PLC Deployment System - Raspberry Pi
+# Deploys legacy_plc to pi-legacy (Pi2) and configures autostart with dashboard
 
 set -e  # Exit on any error
 
@@ -11,6 +11,7 @@ PI_USER="pi"  # Default Pi user
 SERVICE_NAME="legacy-plc"
 INSTALL_DIR="/opt/legacy-plc"
 LOG_DIR="/var/log/legacy-plc"
+WEB_DIR="/var/www/plc-dashboard"
 
 # Colors for output
 RED='\033[0;31m'
@@ -26,15 +27,16 @@ echo_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 usage() {
     cat << EOF
-Legacy PLC Deployment Script
+Legacy PLC Deployment Script - Raspberry Pi
 
 Usage: $0 [COMMAND] [OPTIONS]
 
 Commands:
     build       - Cross-compile for Pi2 target
     deploy      - Deploy binary and configs to pi-legacy
+    dashboard   - Deploy web dashboard only
     service     - Install and enable systemd service
-    full        - Complete deployment (build + deploy + service)
+    full        - Complete deployment (build + deploy + dashboard + service)
     start       - Start the service on pi-legacy
     stop        - Stop the service on pi-legacy
     status      - Check service status
@@ -48,8 +50,9 @@ Options:
     --force         - Skip confirmation prompts
 
 Examples:
-    $0 full                          # Complete deployment
+    $0 full                          # Complete deployment with dashboard
     $0 deploy --host 192.168.10.15  # Deploy to specific IP
+    $0 dashboard                     # Deploy/update dashboard only
     $0 status                        # Check if service is running
     $0 logs                          # View recent logs
 EOF
@@ -70,6 +73,12 @@ check_dependencies() {
         echo_error "Cannot connect to $PI_HOST via SSH"
         echo "Ensure SSH keys are configured or password-less login is set up"
         exit 1
+    fi
+    
+    # Check for dashboard file
+    if [ ! -f "plc_dashboard.html" ]; then
+        echo_warning "Dashboard file not found - dashboard deployment will be skipped"
+        echo "Create plc_dashboard.html from the provided HTML code"
     fi
     
     echo_success "Dependencies satisfied"
@@ -125,15 +134,16 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/log/legacy-plc /tmp
 
-# Resource limits
+# Resource limits for Pi2
 MemoryMax=128M
 CPUQuota=50%
 
-# Network settings for control VLAN
+# Network settings for cluster integration
 Environment="PLC_CONTROL_VLAN=192.168.10.15"
 Environment="PLC_MGMT_VLAN=192.168.99.15"
+Environment="PLC_NODE_TYPE=legacy"
 
-# Logging
+# Logging configuration
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=legacy-plc
@@ -143,8 +153,41 @@ WantedBy=multi-user.target
 EOF
 }
 
+create_nginx_config() {
+    cat << 'EOF'
+server {
+    listen 8000 default_server;
+    server_name _;
+    root /var/www/plc-dashboard;
+    index index.html;
+    
+    # Disable caching for real-time dashboard
+    location / {
+        try_files $uri $uri/ =404;
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        add_header Pragma "no-cache";
+        add_header Expires "0";
+    }
+    
+    # CORS headers for API access
+    location ~* \.(html|js|css)$ {
+        add_header Access-Control-Allow-Origin "*";
+        add_header Access-Control-Allow-Methods "GET, POST, OPTIONS";
+        add_header Access-Control-Allow-Headers "Origin, Content-Type, Accept";
+    }
+    
+    # Health check endpoint
+    location /health {
+        access_log off;
+        return 200 "Dashboard OK\n";
+        add_header Content-Type text/plain;
+    }
+}
+EOF
+}
+
 deploy_to_pi() {
-    echo_info "Deploying to $PI_HOST..."
+    echo_info "Deploying PLC binary to $PI_HOST..."
     
     # Create directories on Pi
     ssh $PI_USER@$PI_HOST "sudo mkdir -p $INSTALL_DIR $LOG_DIR"
@@ -165,7 +208,63 @@ deploy_to_pi() {
         scp legacy_plc.conf $PI_USER@$PI_HOST:$INSTALL_DIR/
     fi
     
-    echo_success "Deployment complete"
+    echo_success "PLC deployment complete"
+}
+
+deploy_dashboard() {
+    if [ ! -f "plc_dashboard.html" ]; then
+        echo_warning "Dashboard file not found - skipping dashboard deployment"
+        return 0
+    fi
+    
+    echo_info "Deploying dashboard to $PI_HOST..."
+    
+    # Create web directory on Pi
+    ssh $PI_USER@$PI_HOST "sudo mkdir -p $WEB_DIR"
+    ssh $PI_USER@$PI_HOST "sudo chown $PI_USER:$PI_USER $WEB_DIR"
+    
+    # Copy dashboard
+    scp plc_dashboard.html $PI_USER@$PI_HOST:$WEB_DIR/index.html
+    
+    # Install and configure nginx
+    ssh $PI_USER@$PI_HOST << 'REMOTE_SCRIPT'
+        # Update package list
+        sudo apt update
+        
+        # Install nginx if not present
+        if ! command -v nginx &> /dev/null; then
+            echo "Installing nginx..."
+            sudo apt install -y nginx
+        fi
+        
+        # Remove default nginx site
+        sudo rm -f /etc/nginx/sites-enabled/default
+        
+        # Install our nginx config
+        sudo tee /etc/nginx/sites-available/plc-dashboard > /dev/null
+REMOTE_SCRIPT
+    
+    # Send nginx config through SSH
+    create_nginx_config | ssh $PI_USER@$PI_HOST "sudo tee -a /etc/nginx/sites-available/plc-dashboard > /dev/null"
+    
+    # Enable and start nginx
+    ssh $PI_USER@$PI_HOST << 'REMOTE_SCRIPT'
+        # Enable site
+        sudo ln -sf /etc/nginx/sites-available/plc-dashboard /etc/nginx/sites-enabled/
+        
+        # Test nginx config
+        if sudo nginx -t; then
+            sudo systemctl restart nginx
+            sudo systemctl enable nginx
+            echo "? Nginx configured and started"
+        else
+            echo "? Nginx configuration error"
+            exit 1
+        fi
+REMOTE_SCRIPT
+    
+    echo_success "Dashboard deployed to http://$PI_HOST:8000"
+    echo_info "Dashboard health check: http://$PI_HOST:8000/health"
 }
 
 install_service() {
@@ -200,10 +299,18 @@ check_service_status() {
         sudo journalctl -u legacy-plc.service -n 10 --no-pager
         
         echo -e "\n=== Network Status ==="
-        ss -tulnp | grep 9001 || echo "Port 9001 not listening"
+        ss -tulnp | grep -E "(9001|8000)" || echo "PLC/Dashboard ports not listening"
         
         echo -e "\n=== Process Status ==="
         ps aux | grep legacy_plc | grep -v grep || echo "Process not running"
+        
+        echo -e "\n=== Dashboard Status ==="
+        if command -v nginx &> /dev/null; then
+            sudo systemctl status nginx --no-pager | head -3
+            curl -s http://localhost:8000/health || echo "Dashboard not responding"
+        else
+            echo "Nginx not installed"
+        fi
 REMOTE_SCRIPT
 }
 
@@ -235,6 +342,22 @@ test_functionality() {
         fi
     done
     
+    # Test management interface
+    echo_info "Testing management interface..."
+    if curl -s "http://$PI_IP:8080/" > /dev/null; then
+        echo_success "Management interface responding"
+    else
+        echo_warning "Management interface not responding"
+    fi
+    
+    # Test dashboard
+    echo_info "Testing dashboard..."
+    if curl -s "http://$PI_IP:8000/health" | grep -q "Dashboard OK"; then
+        echo_success "Dashboard health check passed"
+    else
+        echo_warning "Dashboard not responding"
+    fi
+    
     echo_success "Functionality test complete"
 }
 
@@ -261,6 +384,16 @@ uninstall_service() {
             # Remove installation directory
             sudo rm -rf /opt/legacy-plc
             sudo rm -rf /var/log/legacy-plc
+            
+            # Remove dashboard
+            sudo rm -rf /var/www/plc-dashboard
+            sudo rm -f /etc/nginx/sites-available/plc-dashboard
+            sudo rm -f /etc/nginx/sites-enabled/plc-dashboard
+            
+            # Restart nginx if it's running
+            if systemctl is-active --quiet nginx; then
+                sudo systemctl restart nginx
+            fi
 REMOTE_SCRIPT
         echo_success "Uninstall complete"
     else
@@ -274,7 +407,7 @@ FORCE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        build|deploy|service|full|start|stop|status|logs|uninstall|test)
+        build|deploy|dashboard|service|full|start|stop|status|logs|uninstall|test)
             COMMAND="$1"
             shift
             ;;
@@ -312,6 +445,10 @@ case "$COMMAND" in
         check_dependencies
         deploy_to_pi
         ;;
+    dashboard)
+        check_dependencies
+        deploy_dashboard
+        ;;
     service)
         check_dependencies
         install_service
@@ -321,10 +458,17 @@ case "$COMMAND" in
         check_dependencies
         build_for_pi
         deploy_to_pi
+        deploy_dashboard
         install_service
         test_functionality
         echo_success "Full deployment complete!"
-        echo_info "Service is now running and will autostart on boot"
+        echo_info "PLC Control:    http://$PI_HOST:9001 (ASCII protocol)"
+        echo_info "PLC Management: http://$PI_HOST:8080 (JSON API)"
+        echo_info "Dashboard:      http://$PI_HOST:8000 (Web interface)"
+        echo_info "Dashboard API:  http://$PI_HOST:8000/api/ (CORS-friendly proxy)"
+        echo ""
+        echo_info "Service will auto-start on boot"
+        echo_info "View logs with: ./deploy.sh logs"
         ;;
     start)
         ssh $PI_USER@$PI_HOST "sudo systemctl start legacy-plc.service"

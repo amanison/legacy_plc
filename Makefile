@@ -9,7 +9,8 @@ HOST_ARCH := $(shell uname -m)
 
 # Compiler selection
 NATIVE_CXX = g++
-CROSS_CXX = arm-linux-gnueabihf-g++
+# Auto-detect cross-compiler (Fedora vs Debian/Ubuntu)
+CROSS_CXX = $(shell which arm-linux-gnu-g++ 2>/dev/null || which arm-linux-gnueabihf-g++ 2>/dev/null || echo "arm-linux-gnu-g++")
 
 # Base compiler flags (common to all targets)
 BASE_CXXFLAGS = -std=c++11 -Wall -Wextra -pthread -fno-rtti -ffunction-sections -fdata-sections
@@ -39,10 +40,10 @@ endif
 
 # 2. Cross-Compile for Pi (building on x86/x64 Linux for Pi deployment)
 CROSS_PI_CXX = $(CROSS_CXX)
-CROSS_PI_CXXFLAGS = $(BASE_CXXFLAGS) $(RELEASE_FLAGS) -DLEGACY_HARDWARE -DRASPBERRY_PI
+CROSS_PI_CXXFLAGS = $(BASE_CXXFLAGS) $(RELEASE_FLAGS) -DLEGACY_HARDWARE -DRASPBERRY_PI -DMEMORY_CONSTRAINED
 CROSS_PI_LDFLAGS = $(BASE_LDFLAGS)
 
-# Default to Pi Model B target for cross-compile (most restrictive)
+# Default to Pi Model B target for cross-compile (most restrictive, matches Asymtra cluster)
 CROSS_PI_CXXFLAGS += -march=armv6 -mfpu=vfp -mfloat-abi=hard -DRPI_MODEL_B
 
 # 3. Virtual Cluster Build (x86/x64 for testing/simulation)
@@ -152,7 +153,12 @@ info:
 	@echo "=== Build Environment Information ==="
 	@echo "Host Architecture: $(HOST_ARCH)"
 	@echo "Native Compiler:   $(NATIVE_CXX) ($(shell $(NATIVE_CXX) --version | head -n1))"
-	@echo "Cross Compiler:    $(CROSS_CXX) ($(shell which $(CROSS_CXX) >/dev/null 2>&1 && $(CROSS_CXX) --version | head -n1 || echo 'NOT FOUND'))"
+	@echo "Cross Compiler:    $(CROSS_CXX)"
+	@if which $(CROSS_CXX) >/dev/null 2>&1; then \
+		echo "                   ($(shell $(CROSS_CXX) --version | head -n1))"; \
+	else \
+		echo "                   (NOT FOUND)"; \
+	fi
 	@echo ""
 	@echo "=== Available Build Targets ==="
 	@echo "Native Pi:       rpi-native    (build on Pi)"
@@ -165,7 +171,16 @@ check-deps:
 	@echo "Checking build dependencies..."
 	@which $(NATIVE_CXX) >/dev/null || (echo "✗ $(NATIVE_CXX) not found"; exit 1)
 	@echo "✓ Native compiler found: $(NATIVE_CXX)"
-	@which $(CROSS_CXX) >/dev/null && echo "✓ Cross compiler found: $(CROSS_CXX)" || echo "⚠ Cross compiler not found (install gcc-arm-linux-gnueabihf for Pi cross-compilation)"
+	@if which arm-linux-gnu-g++ >/dev/null 2>&1; then \
+		echo "? Cross compiler found: arm-linux-gnu-g++ (Fedora style)"; \
+	elif which arm-linux-gnueabihf-g++ >/dev/null 2>&1; then \
+		echo "? Cross compiler found: arm-linux-gnueabihf-g++ (Debian/Ubuntu style)"; \
+	else \
+		echo "? Cross compiler not found"; \
+		echo "Install with:"; \
+		echo "  Fedora:       sudo dnf install gcc-arm-linux-gnu gcc-c++-arm-linux-gnu"; \
+		echo "  Ubuntu/Debian: sudo apt install gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf"; \
+	fi
 	@echo "✓ Dependency check complete"
 
 # Test targets (basic functionality verification)
@@ -185,12 +200,12 @@ deploy-prep: clean cross-pi
 	@echo "✓ Deployment binary ready: $(PROJECT)"
 	@file $(PROJECT)
 
-# Deployment targets
-PI_HOST ?= pi-legacy
+# Deployment targets - Asymtra Cluster Physical
+PI_HOST ?= 192.168.99.15
 PI_USER ?= pi
 
-deploy-build: cross-pi-2
-	@echo "? Deployment binary ready for Pi2"
+deploy-build: cross-pi-b
+	@echo "? Deployment binary ready for Pi B v2 (512MB)"
 
 deploy-full: deploy-build
 	@echo "Deploying to $(PI_HOST)..."
@@ -230,8 +245,11 @@ help:
 	@echo "  debug-virtual   - Debug build for virtual cluster"
 	@echo ""
 	@echo "=== Deployment ==="
-	@echo "  deploy-build    - Cross-compile for Pi2 deployment"
-	@echo "  deploy-full     - Complete deployment to pi-legacy" 
+	@echo "  deploy-build    - Cross-compile for Pi B v2 (Asymtra cluster)"
+	@echo "  deploy-full     - Complete deployment to Pi2 Legacy (192.168.99.15)"
+	@echo "  deploy-service  - Install/enable systemd service"
+	@echo "  deploy-test     - Test deployed service"
+	@echo "  deploy-status   - Check service status" 
 	@echo "  deploy-service  - Install/enable systemd service"
 	@echo "  deploy-test     - Test deployed service"
 	@echo "  deploy-status   - Check service status"
